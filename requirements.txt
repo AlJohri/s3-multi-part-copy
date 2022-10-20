@@ -1,0 +1,6 @@
+boto3
+boto3-stubs[s3]
+moto[s3]
+tqdm
+pytest
+black
