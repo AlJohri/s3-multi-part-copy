@@ -1,7 +1,8 @@
-from typing import Optional
+from typing import List, Dict
 import boto3
 import argparse
 from dataclasses import dataclass, asdict
+from urllib import parse
 from pprint import pprint as pp
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor
@@ -26,6 +27,7 @@ class EnrichedCopyTask(CopyTask):
     total_bytes: int
     parts_count: int
     part_size_bytes: int
+    tags: Dict[str, str]
 
 
 @dataclass
@@ -123,6 +125,7 @@ def multipart_upload(task: EnrichedCopyTask):
     response = s3.create_multipart_upload(
         Bucket=task.destination_bucket,
         Key=task.destination_key,
+        Tagging=parse.urlencode(task.tags),
     )
 
     upload_id = response["UploadId"]
@@ -148,7 +151,33 @@ def multipart_upload(task: EnrichedCopyTask):
     return response
 
 
-def copy(task):
+def enrich_task(task: CopyTask) -> EnrichedCopyTask:
+    """
+    This function calls the HeadObject and GetObjectTagging APIs
+    to enrich the task.
+    """
+
+    response = s3.head_object(
+        Bucket=task.source_bucket, Key=task.source_key, PartNumber=1
+    )
+    parts_count = response["PartsCount"] if "PartsCount" in response else 1
+    content_range = response["ResponseMetadata"]["HTTPHeaders"]["content-range"]
+    response = s3.get_object_tagging(Bucket=task.source_bucket, Key=task.source_key)
+    tags = {x["Key"]: x["Value"] for x in response["TagSet"]}
+
+    start, end, total = parse_content_range(content_range)
+    part_size_bytes = end - start + 1
+
+    return EnrichedCopyTask(
+        **asdict(task),
+        parts_count=parts_count,
+        part_size_bytes=part_size_bytes,
+        total_bytes=total,
+        tags=tags,
+    )
+
+
+def copy(task: CopyTask):
     """
     This function determines whether to use regular copy vs multipart upload
     based on the original object that is being copied.
@@ -160,19 +189,9 @@ def copy(task):
     `PartNumber=1`, is the same for all parts (except, of course the last part).
     """
 
-    response = s3.head_object(
-        Bucket=task.source_bucket, Key=task.source_key, PartNumber=1
-    )
-    parts_count = response["PartsCount"] if "PartsCount" in response else 1
-    content_range = response["ResponseMetadata"]["HTTPHeaders"]["content-range"]
-    start, end, total = parse_content_range(content_range)
-    part_size_bytes = end - start + 1
-    task = EnrichedCopyTask(
-        **asdict(task),
-        parts_count=parts_count,
-        part_size_bytes=part_size_bytes,
-        total_bytes=total,
-    )
+    print("CopyTask", task)
+    task = enrich_task(task)
+    print("EnrichedCopyTask", task)
 
     if task.parts_count == 1:
         raise NotImplementedError("regular copy not implemented")
